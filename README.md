@@ -18,7 +18,8 @@ async fn read_file(file: &mut File) -> String {
 }
 ```
 
-The effort is complicated by Rust not supporting self-referential structs.
+The effort fairly involved since you cannot name the lifetime of another struct member.
+Therefore, `unsafe` is needed to circumvent the restrictions of `!Unpin`.
 
 ## Thanks
 
