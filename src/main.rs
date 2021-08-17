@@ -1,4 +1,3 @@
-
 use std::future::Future;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
@@ -29,45 +28,56 @@ async fn read_file(file: &mut File) -> String {
     String::from_utf8(v).unwrap()
 }
 
-enum ReadFileState {
-    State0,
-    State1(Pin<Box<dyn Future<Output=tokio::io::Result<usize>>>>),
-}
-
 struct ReadFileFuture<'a> {
     file: &'a mut File,
-    v: Vec<u8>,
-    state: ReadFileState,
+    v: Option<Vec<u8>>,
+    state: ReadFileState<'a>,
     _pin: PhantomPinned,
 }
 
+enum ReadFileState<'a> {
+    State0,
+    State1(Pin<Box<dyn Future<Output=tokio::io::Result<usize>>+'a>>),
+}
 
 impl<'a> Future for ReadFileFuture<'a> {
     type Output = String;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: There are no references into state
-        let mut state = unsafe { &mut self.get_unchecked_mut().state };
-        match self.state {
+    fn poll<'b>(mut self: Pin<&'b mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let s = unsafe { self.as_mut().get_unchecked_mut() };
+        match s.state {
             ReadFileState::State0 => {
-                let s = self;
-                let file: &'a mut File = s.file;
-                let fut = file.read_to_end(&mut self.v);
-                let wrapped = Box::pin(fut);
-                *state = ReadFileState::State1(wrapped);
-                Poll::Pending
+                let fut = s.file.read_to_end(s.v.as_mut().unwrap());
+                let mut wrapped = Box::pin(fut);
+                let r = wrapped.as_mut().poll(cx);
+                let new_state = unsafe { std::mem::transmute::<_, ReadFileState<'a>>(ReadFileState::State1(wrapped)) };
+                s.state = new_state;
+                match r {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(_) => {
+                        let v = s.v.take().unwrap();
+                        Poll::Ready(String::from_utf8(v).unwrap())
+                    }
+                }
             },
-            ReadFileState::State1(_) => {
-                Poll::Pending
+            ReadFileState::State1(ref mut fut) => {
+                let r = fut.as_mut().poll(cx);
+                if r.is_pending() {
+                    return Poll::Pending;
+                }
+                let v = s.v.take().unwrap();
+                Poll::Ready(String::from_utf8(v).unwrap())
             },
         }
     }
 }
 
+
+
 fn read_file_desugared(file: &mut File) -> impl Future<Output=String> + '_ {
     ReadFileFuture {
         file,
-        v: Vec::new(),
+        v: Some(Vec::new()),
         state: ReadFileState::State0,
         _pin: PhantomPinned {},
     }
@@ -81,5 +91,6 @@ async fn main() {
 
     let mut file = File::open("test").await.unwrap();
     println!("{}", read_file(&mut file).await);
+    let mut file = File::open("test").await.unwrap();
     println!("{}", read_file_desugared(&mut file).await);
 }
