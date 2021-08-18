@@ -15,7 +15,7 @@ An `async` function boils down to a function returning some type that implements
 
 ```rust
 fn does_nothing_desugared() -> impl Future<Output=()> {
-    DoesNothingFuture {}
+    /* ... */
 }
 ```
 
@@ -29,7 +29,33 @@ pub trait Future {
 ```
 
 It offers a poll function that an async runtime can call to make progress on the future.
+We can implement this poll function by creating a struct that implements `Future`:
 
+```rust
+struct DoesNothingFuture;
+
+impl Future for DoesNothingFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(())
+    }
+}
+```
+
+Here the `poll` function immediately resolves the future to the empty tuple.
+The alternative would be to return `Poll::Pending` to signal that it should be 
+polled again later. To determine when it should be polled again 
+Rust futures have a [wakeup mechanism](https://rust-lang.github.io/async-book/02_execution/03_wakeups.html), which I won't detail here.
+
+The `does_nothing_desugared` function then just has to return a new instance 
+of the DoesNothingFuture:
+
+```rust
+fn does_nothing_desugared() -> impl Future<Output=()> {
+    DoesNothingFuture {}
+}
+```
 
 ## A more complex example
 
@@ -43,10 +69,80 @@ async fn read_file(file: &mut File) -> String {
 }
 ```
 
-`read_file` is more complex in that it has an argument and awaits another future.
+The `read_file` function is more complex in that it has an argument and awaits another future.
+To translate this function we again need a struct that implements `Future`:
 
+```rust
+struct ReadFileFuture<'a> {
+    file: &'a mut File,
+    v: Option<Vec<u8>>, // buffer to store data to
+    state: ReadFileState<'a>,
+    _pin: PhantomPinned, // Future is !Unpin
+}
+
+enum ReadFileState<'a> {
+    State0, // Initial
+    State1(Pin<Box<dyn Future<Output=tokio::io::Result<usize>>+'a>>), // Await ReadToEnd future
+}
+```
+
+Here we take the reference to the file, a buffer to store the file contents to 
+and a state that contains nothing initially, but is then filled by 
+the `ReadToEnd` future when the `ReadFileFuture` is first polled.
+We explicitly mark the future as `!Unpin` to avoid it being moved.
+This is necessary since the `ReadToEnd` future holds references to `v` and to `file`.
 The effort fairly involved since you cannot name the lifetime of another struct member.
-Therefore, `unsafe` is needed to circumvent the restrictions of `!Unpin`.
+Therefore, we need to use `unsafe` to circumvent the restrictions of `!Unpin`.
+Here we must be careful not to move any members that another may hold references to.
+
+The `poll` implementation checks which state we are in.
+This roughly corresponds to the different entrypoints of the function:
+
+- the main entrypoint of the function
+- points where `.await` is used in the function
+
+```rust
+impl<'a> Future for ReadFileFuture<'a> {
+    type Output = String;
+
+    fn poll<'b>(mut self: Pin<&'b mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let s = unsafe { self.as_mut().get_unchecked_mut() };
+        loop {
+            match s.state {
+                // Main entrypoint
+                ReadFileState::State0 => {
+                    let fut = s.file.read_to_end(s.v.as_mut().unwrap());
+                    let wrapped = Box::pin(fut);
+                    let new_state = unsafe { std::mem::transmute::<_, ReadFileState<'a>>(ReadFileState::State1(wrapped)) };
+                    s.state = new_state;
+                },
+                // Await ReadToEnd
+                ReadFileState::State1(ref mut fut) => {
+                    let r = fut.as_mut().poll(cx);
+                    if r.is_pending() {
+                        return Poll::Pending;
+                    }
+                    let v = s.v.take().unwrap();
+                    return Poll::Ready(String::from_utf8(v).unwrap());
+                },
+            }
+        }
+    }
+}
+```
+
+We can then again simply return an instance of the struct in the desugared function:
+
+```rust
+fn read_file_desugared(file: &mut File) -> impl Future<Output=String> + '_ {
+    ReadFileFuture {
+        file,
+        v: Some(Vec::new()),
+        state: ReadFileState::State0,
+        _pin: PhantomPinned {},
+    }
+}
+```
 
 ## Thanks
 

@@ -18,7 +18,7 @@ impl Future for DoesNothingFuture {
     }
 }
 
-fn does_nothing_desugared() -> impl Future<Output=()> {
+fn does_nothing_desugared() -> impl Future<Output = ()> {
     DoesNothingFuture {}
 }
 
@@ -37,7 +37,7 @@ struct ReadFileFuture<'a> {
 
 enum ReadFileState<'a> {
     State0,
-    State1(Pin<Box<dyn Future<Output=tokio::io::Result<usize>>+'a>>),
+    State1(Pin<Box<dyn Future<Output = tokio::io::Result<usize>> + 'a>>),
 }
 
 impl<'a> Future for ReadFileFuture<'a> {
@@ -50,9 +50,11 @@ impl<'a> Future for ReadFileFuture<'a> {
                 ReadFileState::State0 => {
                     let fut = s.file.read_to_end(s.v.as_mut().unwrap());
                     let wrapped = Box::pin(fut);
-                    let new_state = unsafe { std::mem::transmute::<_, ReadFileState<'a>>(ReadFileState::State1(wrapped)) };
+                    let new_state = unsafe {
+                        std::mem::transmute::<_, ReadFileState<'a>>(ReadFileState::State1(wrapped))
+                    };
                     s.state = new_state;
-                },
+                }
                 ReadFileState::State1(ref mut fut) => {
                     let r = fut.as_mut().poll(cx);
                     if r.is_pending() {
@@ -60,15 +62,13 @@ impl<'a> Future for ReadFileFuture<'a> {
                     }
                     let v = s.v.take().unwrap();
                     return Poll::Ready(String::from_utf8(v).unwrap());
-                },
+                }
             }
         }
     }
 }
 
-
-
-fn read_file_desugared(file: &mut File) -> impl Future<Output=String> + '_ {
+fn read_file_desugared(file: &mut File) -> impl Future<Output = String> + '_ {
     ReadFileFuture {
         file,
         v: Some(Vec::new()),
@@ -76,7 +76,6 @@ fn read_file_desugared(file: &mut File) -> impl Future<Output=String> + '_ {
         _pin: PhantomPinned {},
     }
 }
-
 
 #[tokio::main]
 async fn main() {
