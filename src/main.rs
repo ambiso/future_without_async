@@ -13,7 +13,7 @@ struct DoesNothingFuture;
 impl Future for DoesNothingFuture {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         Poll::Ready(())
     }
 }
@@ -45,29 +45,23 @@ impl<'a> Future for ReadFileFuture<'a> {
 
     fn poll<'b>(mut self: Pin<&'b mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let s = unsafe { self.as_mut().get_unchecked_mut() };
-        match s.state {
-            ReadFileState::State0 => {
-                let fut = s.file.read_to_end(s.v.as_mut().unwrap());
-                let mut wrapped = Box::pin(fut);
-                let r = wrapped.as_mut().poll(cx);
-                let new_state = unsafe { std::mem::transmute::<_, ReadFileState<'a>>(ReadFileState::State1(wrapped)) };
-                s.state = new_state;
-                match r {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(_) => {
-                        let v = s.v.take().unwrap();
-                        Poll::Ready(String::from_utf8(v).unwrap())
+        loop {
+            match s.state {
+                ReadFileState::State0 => {
+                    let fut = s.file.read_to_end(s.v.as_mut().unwrap());
+                    let wrapped = Box::pin(fut);
+                    let new_state = unsafe { std::mem::transmute::<_, ReadFileState<'a>>(ReadFileState::State1(wrapped)) };
+                    s.state = new_state;
+                },
+                ReadFileState::State1(ref mut fut) => {
+                    let r = fut.as_mut().poll(cx);
+                    if r.is_pending() {
+                        return Poll::Pending;
                     }
-                }
-            },
-            ReadFileState::State1(ref mut fut) => {
-                let r = fut.as_mut().poll(cx);
-                if r.is_pending() {
-                    return Poll::Pending;
-                }
-                let v = s.v.take().unwrap();
-                Poll::Ready(String::from_utf8(v).unwrap())
-            },
+                    let v = s.v.take().unwrap();
+                    return Poll::Ready(String::from_utf8(v).unwrap());
+                },
+            }
         }
     }
 }
