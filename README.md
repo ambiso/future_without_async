@@ -91,8 +91,7 @@ and a state that contains nothing initially, but is then filled by
 the `ReadToEnd` future when the `ReadFileFuture` is first polled.
 We explicitly mark the future as `!Unpin` to avoid it being moved.
 This is necessary since the `ReadToEnd` future holds references to `v` and to `file`.
-The effort fairly involved since you cannot name the lifetime of another struct member.
-Therefore, we need to use `unsafe` to circumvent the restrictions of `!Unpin`.
+Internally we need to use `unsafe` to circumvent the restrictions of `!Unpin`.
 Here we must be careful not to move any members that another may hold references to.
 
 The `poll` implementation checks which state we are in.
@@ -144,7 +143,13 @@ fn read_file_desugared(file: &mut File) -> impl Future<Output=String> + '_ {
 }
 ```
 
-## Thanks
+I am not 100% sure my use of `unsafe` is sound here, in fact I would be surprised by it.
+However, the application does run and seems to produce the correct result.
+
+The transmute is used to convince the compiler to accept a different lifetime for `ReadFileState`.
+This would likely not be necessary if Rust had support for self-referencing structs.
+
+## Acknowledgement
 
 - [Jon Gjengset: The What and How of Futures and async/await in Rust](https://www.youtube.com/watch?v=9_3krAQtD2k)
 - [Jon Gjengset: The Why, What, and How of Pinning in Rust](https://www.youtube.com/watch?v=DkMwYxfSYNQ)
